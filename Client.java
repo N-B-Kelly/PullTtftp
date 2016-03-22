@@ -22,12 +22,17 @@ class Ttftp_Pull_Listener extends Thread{
     private byte[] buffer;
     private boolean verbose;
     private boolean dissallow_unsafe;
+    private boolean enable_reorder;
     private String filename;
 
     private long file_checksum;
     private long file_size;
 
     private List<byte[]> packets;
+    private List<byte[]> reorder_buffer;
+    private List<Long>   reorder_timers;
+
+    private long last_packet_time;
     private long last_ack = -1;
 
     private void save_file (boolean filesize, boolean checksum) {
@@ -128,15 +133,18 @@ class Ttftp_Pull_Listener extends Thread{
 	int retries = 0;
 	int prog = 0;
 	buffer = new byte[buffersize];
-	boolean js = false;
 	long collisions = 0; //might as well count them
 	long corruptcol = 0;
 	long ordercol = 0;
 	long timercol = 0;
+	int timeout = 100;
+	long outordertime = 0;
+	boolean outorder = false;
+	boolean outordertimedout = false;
 
 	while(!discontinue) {
 	    try {
-		if(packetnumber - last_ack == windowsize ) //do we send an ack?
+		if(packetnumber - last_ack >= windowsize ) //do we send an ack?
 		    send_ACK(packetnumber + 1);
 		if(increment_packetnumber) {
 		    packetnumber++;
@@ -197,21 +205,77 @@ class Ttftp_Pull_Listener extends Thread{
 			send_ACK(packetnumber + 1); //final response - host should know they're done
 			discontinue = true;
 		    }
-		    byte[] output = Ttftp_utils.trimHeader(response);
+		    byte[] output = Ttftp_utils.trimHeader(response); //ensures dereferencing
 		    packets.add(output);
 		    increment_packetnumber = true;
 		    retries = 0;
+
+		    //handle out of order packets if we need/want to
+		    if(enable_reorder && outorder && !outordertimedout) {
+			int offset = 2;
+			int add = 0;
+			for(boolean found = true; found;) {
+			    found = false;
+			    for(int i = 0; i < reorder_timers.size(); i++) {
+				//look for anything we want or that has expired
+				if(Ttftp_utils.fromUByte(reorder_buffer.get(i)[0]) == 
+				                     (packetnumber + offset) % 256) {
+				    //we want this one, so snatch it
+				    packets.add(reorder_buffer.get(i));
+				    reorder_buffer.remove(i);
+				    reorder_timers.remove(i);
+				    found = true;
+				    offset++;
+				    add++;
+				    break;
+				}
+				else if (reorder_timers.get(i) +timeout< System.currentTimeMillis()){
+				    //we can dump this one!
+				    reorder_buffer.remove(i);
+				    reorder_timers.remove(i);
+				    i--;
+				}
+			    }
+			}
+			packetnumber += add; //make sure we offset our packetnumber by recovered bytes
+			if(reorder_timers.size() == 0) //we can disable this again
+			    outorder = false;
+		    }
+		    outordertimedout = false; //we can try again next packet!
+			
 		}
-		else {
+		else { //invalid packet number
 		    if(retries >= 10 + windowsize){ //not so silently give up
 			send_ABORT();
 			System.out.println(RETRY_RES); 
 			return;
-		    } 
+		    } //reorder_summary - check valid and add new or (abandon or add cont)
 		    collisions++;
 		    retries++;
 		    ordercol++;
-		    send_ACK(packetnumber);
+		    if(enable_reorder) { //que packets into system if need be
+			if(!outorder && !outordertimedout) {//we start a new queue
+			    outordertime = System.currentTimeMillis();
+			    outorder = true;
+			    reorder_buffer.add(Ttftp_utils.trimHeader(response)); //dereference/trim
+			    reorder_timers.add(System.currentTimeMillis());
+			}
+			else if (!outordertimedout){ //either we have a que or we timed out already!
+			    if(System.currentTimeMillis()-timeout > outordertime){
+				//we can safely delete the lists - we've timed out!
+				reorder_buffer = new LinkedList<byte[]>();
+				reorder_timers = new LinkedList<Long>();
+				outordertimedout = true; //wait for valid packet before repeat
+				send_ACK(packetnumber);//then we can ack away
+			    }
+			    else { //we just want to dunk them into our lists
+				reorder_buffer.add(Ttftp_utils.trimHeader(response));//dereference
+				reorder_timers.add(System.currentTimeMillis());
+			    }
+			}
+		    }
+		    else //don't attempt to reorder - just spit it out
+			send_ACK(packetnumber);
 		}
 	    
 	    } catch (SocketTimeoutException e) {
@@ -289,16 +353,21 @@ class Ttftp_Pull_Listener extends Thread{
 	}
     }
 
-    public Ttftp_Pull_Listener(DatagramSocket socket, int windowsize, int buffersize,
-			       boolean verbose, boolean dissallow_unsafe, String filename) {
+    public Ttftp_Pull_Listener(DatagramSocket socket, int windowsize, int buffersize, boolean verbose,
+			       boolean dissallow_unsafe, String filename, boolean enable_reorder) {
 	this.socket = socket;
 	this.windowsize = windowsize;
 	this.buffersize = buffersize;
 	this.verbose = verbose;
 	this.dissallow_unsafe = dissallow_unsafe;
 	this.filename = filename;
+	this.enable_reorder = enable_reorder;
 	buffer = new byte[buffersize];
 	packets = new LinkedList<byte[]>();
+	if(enable_reorder) {//optional buffer - not needed, might be useful for bad connections!
+	    reorder_buffer = new LinkedList<byte[]>();
+	    reorder_timers = new LinkedList<Long>  ();
+	}
     }
 }
 
@@ -311,6 +380,7 @@ class Ttftp_Pull {
     static boolean verbose = false;
     static int buffersize = 1472; //potential support for variable buffer sizes 
     static boolean dissallow_unsafe = false;
+    static boolean enable_reorder = false;
 
     public static void main(String[] args) {
 	if(!getInfo(args)) return;
@@ -327,7 +397,7 @@ class Ttftp_Pull {
 	    s.send(out);
 
 	    Ttftp_Pull_Listener listener = new Ttftp_Pull_Listener(s, winsize, buffersize, verbose,
-								   dissallow_unsafe, fname);
+						  dissallow_unsafe, fname, enable_reorder);
 	    listener.run();
 	}
 	catch (Exception e) { System.out.println("Could not send to remote host"); }
@@ -335,7 +405,7 @@ class Ttftp_Pull {
     //this looks kinda ugly: we're just fetching the base items, and checking for extensions
     static boolean getInfo(String args[]) { /*[ip][port][filename] (-options: see below)*/
 	try {
-	    if(args.length < 3 || args.length > 11)
+	    if(args.length < 3 || args.length > 12)
 	    throw new Exception();
 	    addr = InetAddress.getByName(args[0]);
 	    port = Integer.parseInt(args[1]);
@@ -346,6 +416,8 @@ class Ttftp_Pull {
 		    verbose = true;
 		else if(args[place].equals("-d"))
 		    dissallow_unsafe = true;
+		else if(args[place].equals("-r"))
+		    enable_reorder = true;
 		else if (args[place].equals("-p"))
 		    password = args[++place];
 		else if (args[place].equals("-w"))
@@ -362,8 +434,8 @@ class Ttftp_Pull {
     }
     
     static String usage = 
-"Usage: [ip] [port] [filename] (-p -w -s -b -d)\n    -p password\n"
-   + "    -w window size\n    -v verbose output\n    -b buffersize\n    -d dissallow unsafe";
+"Usage: [ip] [port] [filename] (-p -w -s -b -d)\n    -p password\n    -r enable packet reordering\n"
+   + "    -w set window size\n    -v verbose output\n    -b set buffersize\n    -d dissallow unsafe";
 }
 
 
