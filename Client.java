@@ -302,7 +302,7 @@ class Ttftp_Pull_Listener extends Thread{
     }
 }
 
-class Ttftp_Pull {
+class PullTTFTP {
     static InetAddress addr;
     static int port;
     static String fname;
