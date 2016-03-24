@@ -368,7 +368,7 @@ class Ttftp_Pull {
 
 
 /*
-  TTFTP UTILITIES - CHEATLIST - 
+  TTFTP UTILITIES - SUMMARY - 
     Ttftp_utils.
   long          extract_checksum         (array)
   long          extract_long             (array, offset)
@@ -379,7 +379,7 @@ class Ttftp_Pull {
   byte[]        appendHeader             (array, OPcode)
   void          output                   (verbose, message)
   byte[]        requestGETTER            (password, filename, windowsize)
-  void          sendPacket               (socket, array, address, port)             ^exception: 
+  void          sendPacket               (socket, array, address, port)             ^e 
   boolean       validPacket              (byte)
   byte          trimHeader               (array)
 */
