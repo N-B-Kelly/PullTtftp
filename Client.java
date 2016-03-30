@@ -349,9 +349,9 @@ class PullTTFTP {
 		else if (args[place].equals("-p"))
 		    password = args[++place];
 		else if (args[place].equals("-w"))
-		    winsize = Integer.parseInt(args[++place]) % 256;
+		    winsize = Integer.parseInt(args[++place]) % (256*256); //2bytes
 		else if (args[place].equals("-b"))
-		    buffersize = Integer.parseInt(args[++place]) % 256;
+		    buffersize = Integer.parseInt(args[++place]);
 		else
 		    throw new Exception();
 		place++;
